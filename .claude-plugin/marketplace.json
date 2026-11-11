@@ -1,0 +1,17 @@
+{
+  "name": "pb-board",
+  "description": "pb-board: a live progress pane for Claude Code (HCF plans, agents, Playwright runs)",
+  "owner": {
+    "name": "Lucas van Staden / Proxiblue"
+  },
+  "plugins": [
+    {
+      "name": "pb-board",
+      "source": "./",
+      "description": "Live side pane for Claude Code: HCF plan task progress, running agents and Playwright test runs",
+      "version": "0.1.0",
+      "license": "Apache-2.0",
+      "keywords": ["mod", "pane", "hcf", "playwright", "progress", "tdd"]
+    }
+  ]
+}

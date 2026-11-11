@@ -1,0 +1,14 @@
+{
+  "name": "pb-board",
+  "version": "0.1.0",
+  "description": "Live side pane for Claude Code: HCF plan task progress, running agents and Playwright test runs",
+  "author": {
+    "name": "Lucas van Staden / Proxiblue",
+    "url": "https://www.proxiblue.com.au"
+  },
+  "homepage": "https://github.com/ProxiBlue/pb-board",
+  "repository": "https://github.com/ProxiBlue/pb-board",
+  "license": "Apache-2.0",
+  "keywords": ["mod", "pane", "hcf", "playwright", "progress", "tdd"],
+  "types": "./types/index.d.ts"
+}

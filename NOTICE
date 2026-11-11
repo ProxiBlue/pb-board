@@ -1,0 +1,27 @@
+pb-board
+Copyright (c) 2026 Lucas van Staden / Proxiblue
+https://github.com/ProxiBlue/pb-board
+
+This product includes software developed by
+Lucas van Staden / Proxiblue (https://www.proxiblue.com.au).
+
+------------------------------------------------------------------------
+
+This mod bundles no third-party source code. It reads files written by,
+and is run alongside, third-party software the consumer installs
+separately:
+
+  * Claude Code — Anthropic
+    https://claude.com/claude-code
+    The mod runs inside Claude Code's mods engine and is typed against
+    its `claude-code` declarations, which are not redistributed here.
+
+  * HCF (plan-create / plan-orchestrate) — Mark Shust
+    https://github.com/markshust/hcf  (MIT)
+    The mod reads the plan files HCF writes. No HCF code is included.
+
+  * Playwright — Microsoft
+    https://github.com/microsoft/playwright  (Apache-2.0)
+    The bundled reporter implements Playwright's Reporter interface and
+    is loaded by the consumer's own Playwright install. No Playwright
+    code is included.
