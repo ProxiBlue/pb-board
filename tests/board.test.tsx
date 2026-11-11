@@ -67,12 +67,18 @@ type World = {
   files: Map<string, string>
   touch: (path: string, text: string) => void
   opened: string[]
+  env: Map<string, string>
 }
 
 let stamp = 1
 
 /** Stands for the engine beneath the mod: a file tree in memory. */
-function world(on: On, seed: Record<string, string>): World {
+function world(
+  on: On,
+  seed: Record<string, string>,
+  variables: Record<string, string> = {},
+): World {
+  const env = new Map<string, string>(Object.entries(variables))
   const files = new Map<string, string>()
   const mtimes = new Map<string, number>()
   const opened: string[] = []
@@ -113,7 +119,13 @@ function world(on: On, seed: Record<string, string>): World {
 
     return text === undefined ? { deny: 'ENOENT' } : { value: text }
   })
-  on('fs.exists', (_, e) => ({ value: files.has(e.path) || isDir(e.path) }))
+  // The mod's bundled reporter is there wherever the engine put the mod.
+  on('fs.exists', (_, e) => ({
+    value:
+      files.has(e.path) ||
+      isDir(e.path) ||
+      e.path.endsWith('/reporter/pb-board-reporter.cjs'),
+  }))
   on('fs.stat', (_, e) => ({
     value: {
       kind: files.has(e.path) ? 'file' : 'dir',
@@ -122,6 +134,16 @@ function world(on: On, seed: Record<string, string>): World {
       isLink: false,
     },
   }))
+  on('env.get', (_, e) => ({ value: env.get(e.name) }))
+  on('env.set', (_, e) => {
+    if (e.value === undefined) {
+      env.delete(e.name)
+    } else {
+      env.set(e.name, e.value)
+    }
+
+    return { value: {} }
+  })
   on('agent.list', () => ({ value: [] }))
   on('session.usage', () => ({ value: { startedAt: 0 } }))
   on('command.register', () => ({ value: { command: 'board' } }))
@@ -134,7 +156,7 @@ function world(on: On, seed: Record<string, string>): World {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.call', () => ({ result: {} }))
 
-  return { files, touch, opened }
+  return { files, touch, opened, env }
 }
 
 test('the parsers read a plan, a task and a command', () => {
@@ -317,4 +339,37 @@ test('with nothing to follow the pane says so, and no tool call is refused', asy
     'No active plan, agents or test run.',
   )
   await ui.unmount()
+})
+
+test('the session start points Playwright at the bundled reporter', async ($, on) => {
+  // The mod's own folder is the engine's to say: the reporter is told by its tail.
+  const TAIL = '/reporter/pb-board-reporter.cjs'
+  const start = { cwd: '/app', surface: 'terminal', isInteractive: true } as const
+
+  mock.clock(on, { now: 4_000_000 })
+  const { env } = world(on, { '/app/readme.md': 'x' })
+
+  // Unset: wired to this install's reporter.
+  await $.session.start(start)
+
+  const wired = env.get('PW_TEST_REPORTER') ?? ''
+
+  expect(wired.endsWith(TAIL)).toBe(true)
+  expect(wired.startsWith('/')).toBe(true)
+
+  // Ours from an older install path: replaced.
+  env.set('PW_TEST_REPORTER', `/old/0.1.0${TAIL}`)
+  await $.session.start(start)
+  expect(env.get('PW_TEST_REPORTER')).toBe(wired)
+
+  // Someone else's reporter: left alone.
+  env.set('PW_TEST_REPORTER', '/their/reporter.js')
+  await $.session.start(start)
+  expect(env.get('PW_TEST_REPORTER')).toBe('/their/reporter.js')
+
+  // Switched off: left unset.
+  env.delete('PW_TEST_REPORTER')
+  env.set('PB_BOARD_REPORTER', 'off')
+  await $.session.start(start)
+  expect(env.get('PW_TEST_REPORTER')).toBeUndefined()
 })

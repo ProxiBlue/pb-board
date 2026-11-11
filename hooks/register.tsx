@@ -25,6 +25,7 @@ import {
 const PANE = 'pb-board'
 const TITLE = 'Board'
 const FEED = 'pb-board/playwright.jsonl'
+const REPORTER = 'reporter/pb-board-reporter.cjs'
 const TICK_MS = 1000
 const SLOW_EVERY = 5
 const STALL_MS = 10 * 60_000
@@ -341,6 +342,35 @@ const tick = async ($: EngineInterface): Promise<void> => {
   }
 }
 
+/**
+ * Points Playwright's extra-reporter hook at the reporter this mod ships, for
+ * every test run the session starts: no settings to edit, and the path is
+ * right wherever the mod is installed. Something else's reporter is left
+ * alone, as is a session that set PB_BOARD_REPORTER=off.
+ */
+const wireReporter = async ($: EngineInterface): Promise<void> => {
+  try {
+    if ((await $.env.get('PB_BOARD_REPORTER')) === 'off') {
+      return
+    }
+
+    const reporter = `${$.plugin.root}/${REPORTER}`
+    const current = (await $.env.get('PW_TEST_REPORTER')) ?? ''
+    // Ours from an earlier install path (a version's cache folder) is replaced.
+    const isOurs = current.endsWith(`/${REPORTER}`)
+
+    if (current === reporter || (current !== '' && !isOurs)) {
+      return
+    }
+
+    if (await $.fs.exists(reporter)) {
+      await $.env.set('PW_TEST_REPORTER', reporter)
+    }
+  } catch (error) {
+    $.ui.log(`pb-board: reporter not wired: ${String(error).slice(0, 200)}`)
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
@@ -356,6 +386,7 @@ export const register: Register = on => {
       .catch(() => $.clock.now())
     pendingFeedDirs.push(cwd)
     isDirty = true
+    await wireReporter($)
     $.clock.every(TICK_MS, () => {
       void tick($)
     })

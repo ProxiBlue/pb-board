@@ -26,7 +26,7 @@ PLAYWRIGHT                          running 42s
 ✗ login.spec.ts › remembers the session      1s
 ```
 
-The board only watches. It never blocks, rewrites or approves a tool call.
+The board only watches. It never blocks, rewrites or approves a tool call. The one thing it changes is a single environment variable, so Playwright reports to it — see [Playwright progress](#playwright-progress).
 
 > **Status: 0.1.0, early.** Claude Code's mods API is early access and changes between releases. This was built and tested on Claude Code 2.1.321. See [Limits](#limits).
 
@@ -51,7 +51,7 @@ The board only watches. It never blocks, rewrites or approves a tool call.
 | **Fullscreen terminal UI** | The docked side pane | `/tui fullscreen`. Outside fullscreen the pane still opens, but inline above the prompt instead of beside the transcript. |
 | **A wide terminal** | The pane opening by itself | 144 columns or more for the first automatic open; 110 once you have opened the board by hand. `/board` opens it at any width. |
 | **HCF plan files** | The Plan section | Plans laid out the way the [HCF](https://github.com/markshust/hcf) plugin writes them. Tested against HCF 1.1.1. Details in [Plan progress](#plan-progress-hcf). |
-| **Playwright Test + Node.js** | The Playwright section | `@playwright/test` with the `PW_TEST_REPORTER` environment hook. Verified on 1.46, 1.54 and 1.58. Needs one environment variable set; see [Playwright progress](#playwright-progress). |
+| **Playwright Test + Node.js** | The Playwright section | `@playwright/test` with the `PW_TEST_REPORTER` environment hook. Verified on 1.46, 1.54 and 1.58. Wired automatically for test runs the session starts; see [Playwright progress](#playwright-progress). |
 | **A git repository** | The Playwright section | The reporter writes its progress file inside the repository's git directory. |
 
 Neither HCF nor Playwright is required for the mod to load. A section with nothing to show is simply left out, and the Agents section works with any subagent.
@@ -76,7 +76,7 @@ In the desktop app, where `/plugin` does not run: click **+** next to the prompt
 
 ### Run it from a clone instead
 
-Useful if you want to change it, or want a stable path to the Playwright reporter:
+Useful if you want to change it:
 
 ```bash
 git clone https://github.com/ProxiBlue/pb-board.git ~/pb-board
@@ -177,45 +177,39 @@ Any tool that writes plans in this layout works; HCF is just the one it was buil
 
 Claude Code does not stream a running command's output to mods, so the board cannot read Playwright's terminal output. Instead the mod ships a small Playwright reporter, [`reporter/pb-board-reporter.cjs`](reporter/pb-board-reporter.cjs), that writes one JSON line per test event to a file the board reads.
 
-### 1. Find a stable path to the reporter
+### It wires itself
 
-Pick one:
+There is nothing to set up. When a session starts, the mod sets the environment variable `PW_TEST_REPORTER` to the absolute path of its own bundled reporter, for that Claude Code process. Every command the session then runs inherits it, so any `playwright test` Claude starts loads the reporter.
 
-- **Clone the repository** and use `<clone>/reporter/pb-board-reporter.cjs`. Recommended: the path does not move.
-- **Copy the file** into your project or anywhere you like. It is a single file with no dependencies.
-- **Use the installed copy.** A marketplace install is kept under `~/.claude/plugins/cache/`, typically `~/.claude/plugins/cache/pb-board/pb-board/<version>/reporter/pb-board-reporter.cjs`. That path changes with every version, so you would have to update the variable after each upgrade.
+- Playwright loads it **in addition to** the reporters in your `playwright.config`. None of yours are replaced and your config file is not touched.
+- The path is worked out from wherever the mod is installed, each time a session starts, so it stays right across upgrades and install methods (marketplace install, a clone, `--plugin-dir`).
+- **If `PW_TEST_REPORTER` is already set to something else, the mod leaves it alone** and the Playwright section stays empty. Editor integrations use this variable too.
+- **To switch the wiring off**, start Claude Code with `PB_BOARD_REPORTER=off` in the environment.
 
-### 2. Point Playwright at it
+> `PW_TEST_REPORTER` is the hook Playwright's own editor integration uses to add a reporter. It is present in the versions listed under [Requirements](#requirements) but is not a documented public option, so a future Playwright release could change it. Listing the reporter in `playwright.config` (below) does not depend on it.
 
-Set `PW_TEST_REPORTER` to the reporter's **absolute path** in the environment Playwright runs in. Playwright loads it *in addition to* the reporters in your `playwright.config`; none of yours are replaced, and your config file is not touched.
+### When you have to wire it by hand
 
-For every Playwright run Claude starts, put it in `~/.claude/settings.json`:
+The automatic wiring only reaches processes the Claude Code session starts *directly*. Set it up by hand when Playwright runs somewhere that environment does not reach:
 
-```json
-{
-  "env": {
-    "PW_TEST_REPORTER": "/home/you/pb-board/reporter/pb-board-reporter.cjs"
-  }
-}
-```
+- **Inside a container while Claude Code runs outside it.** `docker exec`, `ddev exec` and friends do not pass the caller's environment through.
+- **In your own terminal**, outside Claude Code, when you want a session to show the run.
 
-Or per command:
+In those cases give Playwright the reporter yourself. The reporter is a single file with no dependencies, so copy it anywhere, or use it from a clone of this repository:
 
 ```bash
-PW_TEST_REPORTER=/home/you/pb-board/reporter/pb-board-reporter.cjs npx playwright test
+# per command
+PW_TEST_REPORTER=/abs/path/pb-board-reporter.cjs npx playwright test
 ```
-
-Or, if you would rather not rely on the environment variable, list it in `playwright.config.ts` like any other reporter:
 
 ```ts
-reporter: [['list'], ['/home/you/pb-board/reporter/pb-board-reporter.cjs']],
+// or in playwright.config.ts, like any other reporter
+reporter: [['list'], ['/abs/path/pb-board-reporter.cjs']],
 ```
 
-> `PW_TEST_REPORTER` is the hook Playwright's own editor integration uses to add a reporter. It is present in the versions listed under [Requirements](#requirements) but is not a documented public option, so a future Playwright release could change it. The `playwright.config` route does not depend on it.
+For a container, the path must exist **inside** the container (mount or copy the file in), and the variable must be set in the container's environment. The project's `.git` directory must be on a shared mount — it is whenever the project folder is bind-mounted — so the board can read the file from the other side.
 
-### 3. Run the tests
-
-Nothing else to do. The board picks the run up within a second (five when it was idle) and opens.
+If Claude Code itself runs inside the container, none of this applies: the automatic wiring works there as anywhere.
 
 ### Where the progress file goes
 
@@ -227,14 +221,7 @@ The board looks for that file in the git directory of:
 - the project of the plan it is following, and
 - any folder a `cd …` in a `playwright test` command points at.
 
-Set `PB_BOARD_FILE` to make the reporter write somewhere else — only useful to point it at one of those locations when your Playwright config sits outside the repository.
-
-### Containers (Docker, DDEV, …)
-
-Two things to get right when Playwright runs inside a container and Claude Code outside it (or the other way round):
-
-- `PW_TEST_REPORTER` must be set **inside the environment where Playwright runs**, and must be a path that exists **there**. Mount or copy the reporter into the container and set the variable in the container's environment.
-- The project's `.git` directory must be on a shared mount, which it is whenever the project folder itself is bind-mounted. The reporter then writes the file through the mount and the board reads it from the other side.
+Set `PB_BOARD_FILE` in Playwright's environment to make the reporter write somewhere else — only useful to point it at one of those locations when your Playwright config sits outside the repository.
 
 ### The reporter's promises
 
@@ -253,6 +240,7 @@ Two things to get right when Playwright runs inside a container and Claude Code 
 ```
 
 - **Observer only.** The `tool.call` hook looks at the call's file path or command, remembers what it saw, and passes the call on untouched. It makes no engine calls, so it adds no latency and cannot refuse or alter anything.
+- **One environment variable.** At session start the mod sets `PW_TEST_REPORTER` for the session's process, unless it is already set or `PB_BOARD_REPORTER=off`. That is the only thing it changes outside its own state.
 - **A one-second timer** does the reading. Files are re-read only when their modification time changes. While nothing is active the timer drops to one pass every five seconds.
 - **The pane redraws only when the data changes.** Elapsed-time counters tick only while an agent or a test is actually running.
 - **State is per session.** Nothing is written to disk by the mod itself; a new session starts with an empty board.
@@ -274,7 +262,7 @@ Two things to get right when Playwright runs inside a container and Claude Code 
 - **One Playwright run at a time per repository.** Each run overwrites the progress file. Two suites running at once in the same repository will interleave.
 - **A killed run looks alive for a while.** If Playwright is killed before it can write its last line, the board shows the run as `running` until ten minutes pass with no new event, then marks it `stalled`.
 - **Runs from before the session are ignored.** A finished run only shows if it ended after the session began.
-- **Terminal output is not read.** Without the reporter the Playwright section stays empty.
+- **Terminal output is not read.** A run that does not load the reporter (see [When you have to wire it by hand](#when-you-have-to-wire-it-by-hand)) leaves the Playwright section empty.
 - **Not type-checked in CI.** The mod is checked by `claude plugin validate` and `claude plugin test`; there is no `tsc` step yet.
 
 ## Troubleshooting
@@ -290,7 +278,7 @@ The board follows a plan only after a tool call has touched it in this session a
 
 **The Playwright section is empty.**
 Check, in order:
-1. `echo $PW_TEST_REPORTER` *in the environment Playwright runs in* prints an absolute path that exists there.
+1. Ask Claude to run `printenv PW_TEST_REPORTER`. It should print a path ending in `reporter/pb-board-reporter.cjs`. If it prints something else, another tool owns the variable; if Playwright runs in a container or another terminal, the session's environment does not reach it — wire it by hand.
 2. After a run, `<repo>/.git/pb-board/playwright.jsonl` exists and has a fresh timestamp. If it does not, the reporter did not load — Playwright prints an error when the path is wrong.
 3. The session was started inside that repository, or the test command contains a `cd` into it.
 

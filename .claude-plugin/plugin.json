@@ -1,6 +1,6 @@
 {
   "name": "pb-board",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Live side pane for Claude Code: HCF plan task progress, running agents and Playwright test runs",
   "author": {
     "name": "Lucas van Staden / Proxiblue",
