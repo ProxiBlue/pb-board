@@ -1,5 +1,7 @@
 # pb-board
 
+For Codex CLI, see the [Codex companion pane setup](codex/README.md).
+
 A Claude Code **mod** that puts a live progress board in the side pane of the fullscreen terminal UI. It shows three things while Claude works:
 
 - **Plan** — the HCF plan being executed: status, a progress bar, and one row per task with its state and how many of its requirements are ticked.

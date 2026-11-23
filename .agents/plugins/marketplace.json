@@ -1,0 +1,10 @@
+{
+  "name": "pb-board",
+  "interface": { "displayName": "PB Board" },
+  "plugins": [
+    {
+      "name": "pb-board-codex",
+      "source": { "source": "local", "path": "./codex" }
+    }
+  ]
+}

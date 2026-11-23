@@ -1,0 +1,6 @@
+{
+  "name": "pb-board-codex",
+  "version": "0.1.0",
+  "description": "Follow HCF plans, Codex subagents, and Playwright runs in a terminal pane.",
+  "hooks": "./hooks.json"
+}
