@@ -1,7 +1,7 @@
 {
   "name": "pb-board",
-  "version": "0.2.0",
-  "description": "Live side pane for Claude Code: HCF plan task progress, running agents and Playwright test runs",
+  "version": "0.3.0",
+  "description": "Live side pane for Claude Code: HCF plan task progress, running agents, Playwright test runs, and a guard on /exit while this session's tests run",
   "author": {
     "name": "Lucas van Staden / Proxiblue",
     "url": "https://www.proxiblue.com.au"
@@ -9,6 +9,6 @@
   "homepage": "https://github.com/ProxiBlue/pb-board",
   "repository": "https://github.com/ProxiBlue/pb-board",
   "license": "Apache-2.0",
-  "keywords": ["mod", "pane", "hcf", "playwright", "progress", "tdd"],
+  "keywords": ["mod", "pane", "hcf", "playwright", "progress", "tdd", "tests"],
   "types": "./types/index.d.ts"
 }

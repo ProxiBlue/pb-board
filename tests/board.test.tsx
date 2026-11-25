@@ -9,6 +9,15 @@ import {
   parseTask,
   planDirIn,
 } from '../hooks/parse'
+import {
+  bandLines,
+  dur,
+  exitWarning,
+  groupFleet,
+  ownRunsFrom,
+  parseFleet,
+  runnerKind,
+} from '../hooks/watch'
 
 const PLAN_MD = `# Plan: Demo feature
 
@@ -63,6 +72,9 @@ const PANE = {
   },
 } as const
 
+/** What a stubbed `$.process.run` answers: a result, or null for a missing command. */
+type Run = (argv: readonly string[]) => { exitCode: number; stdout: string } | null
+
 type World = {
   files: Map<string, string>
   touch: (path: string, text: string) => void
@@ -77,6 +89,7 @@ function world(
   on: On,
   seed: Record<string, string>,
   variables: Record<string, string> = {},
+  run: Run = () => null,
 ): World {
   const env = new Map<string, string>(Object.entries(variables))
   const files = new Map<string, string>()
@@ -145,7 +158,21 @@ function world(
     return { value: {} }
   })
   on('agent.list', () => ({ value: [] }))
-  on('session.usage', () => ({ value: { startedAt: 0 } }))
+  on('session.usage', () => ({ value: { startedAt: 0 } as never }))
+  on('process.run', (_, e) => {
+    const ran = run(e.argv)
+
+    return ran === null
+      ? { deny: 'ENOENT' }
+      : {
+          value: {
+            ...ran,
+            stderr: '',
+            isStdoutTruncated: false,
+            isStderrTruncated: false,
+          },
+        }
+  })
   on('command.register', () => ({ value: { command: 'board' } }))
   on('ui.open', (_, e) => {
     opened.push(e.id)
@@ -372,4 +399,223 @@ test('the session start points Playwright at the bundled reporter', async ($, on
   env.set('PB_BOARD_REPORTER', 'off')
   await $.session.start(start)
   expect(env.get('PW_TEST_REPORTER')).toBeUndefined()
+})
+
+// The real shape of a parallel suite run under an in-container Claude session
+// (host ps): the Bash tool's wrapper, yarn, the parallel orchestrator, the
+// lane's playwright, its workers and browsers; plus the session's own
+// playwright-mcp and a slot agent's run that belongs to no session.
+const PS = [
+  '      1       0  111460 /sbin/docker-init -- /start.sh',
+  '2741657       1  109996 /usr/bin/python3 /usr/bin/supervisord -n -c /etc/supervisor/supervisord-nginx-fpm.conf',
+  '2487186       1  111299 /bin/bash /mnt/ddev_config/commands/web/claude',
+  '2487194 2487186  111299 claude --mcp-config /home/dev/.claude/mcp.json',
+  "1624246 2487194    3269 /bin/bash -c source /home/dev/.claude/shell-snapshots/snapshot-bash-1795509285988-act727.sh 2>/dev/null || true && eval 'cd /var/www/html/tests/apps/shop && set -o pipefail && yarn --silent test:all --slots=t1 2>&1' < /dev/null",
+  '1624295 1624246    3269 node /usr/local/bin/yarn --silent test:all --slots=t1',
+  '1624872 1624295    3269 /bin/sh -c bash ../../../bin/test-parallel --slots=t1',
+  '1624873 1624872    3269 /mnt/ddev-global-cache/n_prefix/shop-web/bin/node /var/www/html/tests/m2-hyva-playwright/node_modules/.bin/ts-node --transpile-only /var/www/html/tests/apps/shop/parallel/run.ts',
+  '2339820 1624873    1205 npm exec playwright test --test-list /var/www/html/test-results/parallel/lanes/main/test-list.txt --workers=4',
+  '2340336 2339820    1205 sh -c playwright test --test-list /var/www/html/test-results/parallel/lanes/main/test-list.txt --workers=4',
+  '2340337 2340336    1205 /mnt/ddev-global-cache/n_prefix/shop-web/bin/node /var/www/html/tests/apps/node_modules/.bin/playwright test --test-list /var/www/html/test-results/parallel/lanes/main/test-list.txt --workers=4',
+  '2342615 2340337    1199 /mnt/ddev-global-cache/n_prefix/shop-web/bin/node /var/www/html/tests/m2-hyva-playwright/node_modules/playwright/lib/common/process.js',
+  '2343356 2342615    1197 /opt/playwright-browsers/chromium_headless_shell-1208/chrome-headless-shell-linux64/chrome-headless-shell --disable-field-trial-config',
+  '2488660 2487194  111734 npm exec @playwright/mcp --no-sandbox --isolated --ignore-https-errors',
+  '2488661 2488660  111734 sh -c playwright-mcp --no-sandbox --isolated --ignore-https-errors',
+  '1598115 2741657    3335 node /var/www/html/tests/m2-hyva-playwright/node_modules/.bin/ts-node --transpile-only /var/www/html/tests/apps/shop/parallel/slot-agent.ts',
+  '2464904 1598115    1118 npm exec playwright test --test-list /var/www/html/test-results/parallel/jobs/abc/test-list.txt --workers=1',
+  '3000001 2487194       0 ps -eo pid=,ppid=,etimes=,args=',
+].join('\n')
+
+const FLEET = JSON.stringify([
+  {
+    project: 'shop', base: 'shop', slot: 'main',
+    container: 'ddev-shop-web', kind: 'pkg-test',
+    label: 'yarn --silent test:all --slots=t1', pid: 1624295, elapsed_s: 3540,
+    owner: { kind: 'claude', pid: 2487194, name: 'shop-agent' },
+  },
+  {
+    project: 'shop-t1', base: 'shop', slot: 't1',
+    container: 'ddev-shop-t1-web', kind: 'playwright',
+    label: 'npm exec playwright test --test-list test-list.txt --workers=1',
+    pid: 2464904, elapsed_s: 1209,
+    owner: { kind: 'supervisord', pid: 2741657, name: null },
+  },
+  { project: 7, note: 'off-shape: dropped' },
+])
+
+const BAND = {
+  plugin: 'pb-board',
+  component: 'AbovePrompt',
+  requestId: 'band',
+  props: {
+    hasSurvey: false,
+    isCollapsed: false,
+    isWorking: false,
+    maxRows: 10,
+    bodyColumns: 140,
+    scroll: { offset: 0, bodyRows: 9 },
+    view: {},
+  },
+} as const
+
+/** `sh -c 'echo $PPID; exec ps …'` as the session process 2487194 runs it. */
+const ownPs = (ps: string) => ({ exitCode: 0, stdout: `2487194\n${ps}\n` })
+
+/** `/exit` typed at the prompt. */
+const EXIT = {
+  command: 'exit',
+  args: '',
+  origin: { kind: 'composer' },
+  presentation: { isFullscreen: true, columns: 160 },
+} as const
+
+test('a run is its top-most runner under this session, nothing else', () => {
+  const runs = ownRunsFrom(`2487194\n${PS}\n`)
+
+  expect(runs).toEqual([
+    { pid: 1624295, kind: 'pkg-test', label: 'yarn --silent test:all --slots=t1', elapsedS: 3269 },
+  ])
+
+  // The child process.run started may sit under a helper: walked up to claude.
+  const helper = `3100000\n${PS}\n3100000 2487194 1 /usr/bin/env sh -c x\n`
+
+  expect(ownRunsFrom(helper).map(run => run.pid)).toEqual([1624295])
+
+  // A Bash wrapper that names the command is the shell, not the run.
+  const bare = [
+    '10 1 100 claude',
+    "11 10 50 /bin/bash -c source /root/.claude/shell-snapshots/snapshot-bash-1.sh && eval 'npx playwright test --grep @smoke'",
+    '12 11 49 node /app/node_modules/.bin/playwright test --grep @smoke',
+  ].join('\n')
+
+  expect(ownRunsFrom(`10\n${bare}\n`)).toEqual([
+    { pid: 12, kind: 'playwright', label: 'playwright test --grep @smoke', elapsedS: 49 },
+  ])
+
+  expect(runnerKind('npm exec @playwright/mcp --no-sandbox')).toBe(null)
+  expect(runnerKind('node /x/playwright/lib/common/process.js')).toBe(null)
+  expect(runnerKind('vendor/bin/phpunit -c dev/tests')).toBe('phpunit')
+  expect(runnerKind('python3 -m pytest -q')).toBe('pytest')
+  expect(runnerKind('npx vitest')).toBe(null)
+  expect(() => ownRunsFrom('not a pid\n')).toThrow()
+})
+
+test('the host view reads, groups and words like tests-running --short', () => {
+  const fleet = parseFleet(FLEET)
+
+  expect(fleet.length).toBe(2)
+  expect(fleet[1]?.owner).toEqual({ kind: 'supervisord', pid: 2741657, name: null })
+  expect(groupFleet(fleet)).toBe('shop main+t1 59m')
+  expect(parseFleet('nope')).toEqual([])
+  expect(parseFleet('{"a":1}')).toEqual([])
+  expect([dur(45), dur(420), dur(3720)]).toEqual(['45s', '7m', '1h02m'])
+  expect(
+    bandLines(fleet, [{ pid: 1, kind: 'pkg-test', label: 'yarn test', elapsedS: 125 }]),
+  ).toEqual([
+    '🧪 tests: shop main+t1 59m',
+    '⚠ test run in this session: yarn test 2m. Closing this session kills it.',
+  ])
+})
+
+test('the band shows the host runs and this session\'s own; the pane lists them', async ($, on) => {
+  const clock = mock.clock(on, { now: 5_000_000 })
+
+  world(on, { '/repo/readme.md': 'x' }, {}, argv =>
+    argv[0] === 'tests-running'
+      ? { exitCode: 0, stdout: FLEET }
+      : argv[0] === 'sh'
+        ? ownPs(PS)
+        : null,
+  )
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Text', text: /^🧪/ }))?.text).toBe(
+    '🧪 tests: shop main+t1 59m',
+  )
+  expect((await ui.find({ type: 'Text', text: /^⚠/ }))?.text).toBe(
+    '⚠ test run in this session: yarn --silent test:all --slots=t1 54m. Closing this session kills it.',
+  )
+  await ui.unmount()
+
+  // A survey keeps the band: nothing of ours.
+  ui = await $.ui.mount({
+    ...BAND,
+    props: { ...BAND.props, hasSurvey: true },
+    surface: 'terminal',
+  })
+  expect(await ui.find({ type: 'Text', text: /^🧪/ })).toBeUndefined()
+  await ui.unmount()
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await pane.find({ type: 'Text', text: /^TESTS/ }))?.text).toBe('TESTS')
+  expect(
+    (await pane.find({ type: 'Text', text: /^shop-t1 t1 playwright/ }))?.text,
+  ).toMatch(/^shop-t1 t1 playwright\s*$/)
+  expect(await pane.find({ type: 'Text', text: /^supervisord · npm exec playwright/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^claude shop-agent · yarn --silent/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^20m$|^ 20m$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('with no tests-running and no runs the band draws nothing of ours', async ($, on) => {
+  const clock = mock.clock(on, { now: 6_000_000 })
+  const asked: string[] = []
+
+  world(on, { '/c/readme.md': 'x' }, {}, argv => {
+    asked.push(argv[0] ?? '')
+
+    return argv[0] === 'sh' ? ownPs('2487194 1 10 claude') : null
+  })
+  await $.session.start({ cwd: '/c', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+
+  expect(await ui.find({ type: 'Text', text: /^🧪|^⚠/ })).toBeUndefined()
+  await ui.unmount()
+
+  // A missing script is not asked again at every poll.
+  await clock.advance(60_000)
+  expect(asked.filter(one => one === 'tests-running').length).toBe(1)
+})
+
+test('/exit asks once while this session runs tests; again within 20s quits', async ($, on) => {
+  const clock = mock.clock(on, { now: 7_000_000 })
+  let ps: string | null = PS
+
+  world(on, { '/w/readme.md': 'x' }, {}, argv =>
+    argv[0] === 'sh' ? (ps === null ? null : ownPs(ps)) : null,
+  )
+  on('command.run', () => ({ text: 'EXITED' }))
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+
+  const first = await $.command.run(EXIT)
+
+  expect(first.text).toBe(
+    exitWarning([
+      { pid: 1624295, kind: 'pkg-test', label: 'yarn --silent test:all --slots=t1', elapsedS: 3269 },
+    ]),
+  )
+  expect(first.text).toContain('Type /exit again within 20s to quit anyway.')
+  await clock.advance(5000)
+  expect((await $.command.run(EXIT)).text).toBe('EXITED')
+
+  // Past the window: asked again.
+  await $.command.run(EXIT)
+  await clock.advance(21_000)
+  expect((await $.command.run(EXIT)).text).toContain('again within 20s')
+
+  // No run: quits at once.
+  ps = '2487194 1 10 claude'
+  await clock.advance(21_000)
+  expect((await $.command.run(EXIT)).text).toBe('EXITED')
+
+  // ps fails: never trapped.
+  ps = null
+  expect((await $.command.run(EXIT)).text).toBe('EXITED')
 })

@@ -78,8 +78,42 @@ export type Focus = {
   openedRun: number
 }
 
+/** One run `tests-running --json` reports: a host-wide view, every container. */
+export type FleetRun = {
+  project: string
+  /** The project without a test-slot suffix (`shop-t1` → `shop`). */
+  base: string
+  /** `main`, a slot (`t1`), or `host` for a run outside any container. */
+  slot: string
+  container: string
+  kind: string
+  label: string
+  pid: number
+  elapsedS: number
+  owner: { kind: string; pid: number | null; name: string | null }
+}
+
+/** A test run started under this session's own process. */
+export type OwnRun = {
+  pid: number
+  kind: string
+  label: string
+  elapsedS: number
+}
+
+export type TestWatch = {
+  /** Every run on the host, when `tests-running` is there to ask. */
+  fleet: FleetRun[]
+  /** The runs this session started; closing the session kills them. */
+  own: OwnRun[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'pb-board': { board: Shaped<Board>; focus: Shaped<Focus> }
+    'pb-board': {
+      board: Shaped<Board>
+      focus: Shaped<Focus>
+      watch: Shaped<TestWatch>
+    }
   }
 }

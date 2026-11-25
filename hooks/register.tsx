@@ -5,9 +5,11 @@ import type {
   AgentRow,
   Board,
   Focus,
+  OwnRun,
   PlanView,
   TaskRow,
   TestsView,
+  TestWatch,
 } from '../types'
 import {
   bar,
@@ -21,6 +23,15 @@ import {
   planDirIn,
   resolvePath,
 } from './parse'
+import {
+  bandLines,
+  dur,
+  EXIT_CONFIRM_MS,
+  exitWarning,
+  ownerText,
+  ownRunsFrom,
+  parseFleet,
+} from './watch'
 
 const PANE = 'pb-board'
 const TITLE = 'Board'
@@ -29,6 +40,12 @@ const REPORTER = 'reporter/pb-board-reporter.cjs'
 const TICK_MS = 1000
 const SLOW_EVERY = 5
 const STALL_MS = 10 * 60_000
+/** How often the test runs (this session's, and the host's) are looked at. */
+const WATCH_MS = 15_000
+/** A host without `tests-running` is asked again after this long. */
+const FLEET_RETRY_MS = 5 * 60_000
+/** This session's process, then every process: whose runs are ours. */
+const OWN_SCRIPT = 'echo $PPID; exec ps -eo pid=,ppid=,etimes=,args='
 
 const EMPTY: Board = { plan: null, agents: [], tests: null, now: 0 }
 const NO_FOCUS: Focus = {
@@ -47,6 +64,10 @@ const board = atom({ plugin: 'pb-board', key: 'board' } as const, EMPTY, {
 const focus = atom({ plugin: 'pb-board', key: 'focus' } as const, NO_FOCUS, {
   shape: 'focus-2',
 })
+const NO_RUNS: TestWatch = { fleet: [], own: [] }
+const watch = atom({ plugin: 'pb-board', key: 'watch' } as const, NO_RUNS, {
+  shape: 'watch-1',
+})
 
 type Cached = { mtimeMs: number; text: string }
 
@@ -61,6 +82,9 @@ let isDirty = true
 let beat = 0
 let pendingCandidate: string | null = null
 let pendingFeedDirs: string[] = []
+let isPolling = false
+let fleetRetryAt = 0
+let exitArmedAt = 0
 const texts = new Map<string, Cached>()
 
 const readCached = async (
@@ -342,6 +366,67 @@ const tick = async ($: EngineInterface): Promise<void> => {
   }
 }
 
+/** The test runs started under this session's process; throws when ps can't tell. */
+const readOwn = async ($: EngineInterface): Promise<OwnRun[]> => {
+  const ran = await $.process.run(['sh', '-c', OWN_SCRIPT], { timeoutMs: 5000 })
+
+  if (ran.exitCode !== 0) {
+    throw new Error(`ps exited ${ran.exitCode}`)
+  }
+
+  return ownRunsFrom(ran.stdout)
+}
+
+/**
+ * Every run on the host, from the host's `tests-running` script. Nothing where
+ * it is missing (a container) or fails, and then not asked again for a while.
+ */
+const readFleet = async ($: EngineInterface, now: number) => {
+  if (now < fleetRetryAt) {
+    return []
+  }
+
+  try {
+    const ran = await $.process.run(['tests-running', '--json'], {
+      timeoutMs: 10_000,
+    })
+
+    if (ran.exitCode === 0) {
+      return parseFleet(ran.stdout)
+    }
+  } catch {
+    // Not on this machine.
+  }
+
+  fleetRetryAt = now + FLEET_RETRY_MS
+
+  return []
+}
+
+const pollTests = async ($: EngineInterface): Promise<void> => {
+  if (isPolling) {
+    return
+  }
+
+  isPolling = true
+
+  try {
+    const now = await $.clock.now()
+    const fleet = await readFleet($, now)
+    const own = await readOwn($).catch(() => [])
+    const next: TestWatch = { fleet, own }
+    const was = await read($, watch)
+
+    if (JSON.stringify(next) !== JSON.stringify(was)) {
+      await update($, watch, () => next)
+    }
+  } catch (error) {
+    $.ui.log(`pb-board: test watch: ${String(error).slice(0, 200)}`)
+  } finally {
+    isPolling = false
+  }
+}
+
 /**
  * Points Playwright's extra-reporter hook at the reporter this mod ships, for
  * every test run the session starts: no settings to edit, and the path is
@@ -390,6 +475,10 @@ export const register: Register = on => {
     $.clock.every(TICK_MS, () => {
       void tick($)
     })
+    $.clock.every(WATCH_MS, () => {
+      void pollTests($)
+    })
+    void pollTests($)
 
     return next(e)
   })
@@ -485,9 +574,72 @@ export const register: Register = on => {
     return { text: 'Board opened.' }
   })
 
+  // /exit while this session's own test run is going: asked once, a second
+  // /exit within the window quits. Anything that goes wrong lets it quit.
+  on('command.run', { command: 'exit' }, async ($, e, next) => {
+    let own: OwnRun[]
+    let now: number
+
+    try {
+      now = await $.clock.now()
+
+      if (exitArmedAt > 0 && now - exitArmedAt <= EXIT_CONFIRM_MS) {
+        exitArmedAt = 0
+
+        return next(e)
+      }
+
+      own = await readOwn($)
+    } catch {
+      return next(e)
+    }
+
+    if (own.length === 0) {
+      exitArmedAt = 0
+
+      return next(e)
+    }
+
+    exitArmedAt = now
+    await update($, watch, at => ({ ...at, own })).catch(() => undefined)
+
+    return { text: exitWarning(own) }
+  })
+
+  // The band above the prompt: the host's test runs, and a warning while this
+  // session's own run would die with it. A survey keeps the band.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) {
+      return next(e)
+    }
+
+    const at = await read($, watch)
+    const lines = bandLines(at.fleet, at.own)
+
+    if (lines.length === 0) {
+      return next(e)
+    }
+
+    const below = await next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const width = Math.max(20, e.props.bodyColumns)
+
+    return (
+      <Box flexDirection="column">
+        {lines.map(line => (
+          <Text color={line.startsWith('⚠') ? 'warning' : undefined}>
+            {clip(line, width)}
+          </Text>
+        ))}
+        {below}
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const view = await read($, board)
+    const runs = await read($, watch)
     const width = Math.max(24, e.props.bodyColumns)
     const { plan, agents, tests, now } = view
 
@@ -630,13 +782,34 @@ export const register: Register = on => {
       )
     }
 
-    const isEmpty = plan === null && tests === null && agents.length === 0
+    const runsPart = (at: TestWatch) => (
+      <Box flexDirection="column" marginTop={1}>
+        {head('TESTS', String(at.fleet.length > 0 ? at.fleet.length : at.own.length))}
+        {at.fleet.length > 0
+          ? at.fleet.map(run => (
+              <Box flexDirection="column">
+                {row('▶', 'warning', `${run.project} ${run.slot} ${run.kind}`, dur(run.elapsedS))}
+                {row(' ', undefined, `${ownerText(run.owner)} · ${run.label}`, '', true)}
+              </Box>
+            ))
+          : at.own.map(run => (
+              <Box flexDirection="column">
+                {row('▶', 'warning', `this session ${run.kind}`, dur(run.elapsedS))}
+                {row(' ', undefined, run.label, '', true)}
+              </Box>
+            ))}
+      </Box>
+    )
+    const hasRuns = runs.fleet.length > 0 || runs.own.length > 0
+    const isEmpty =
+      plan === null && tests === null && agents.length === 0 && !hasRuns
 
     return (
       <Box flexDirection="column">
         {plan !== null && planPart(plan)}
         {agents.length > 0 && agentsPart(agents)}
         {tests !== null && testsPart(tests)}
+        {hasRuns && runsPart(runs)}
         {isEmpty && (
           <Box flexDirection="column">
             <Text dimColor>No active plan, agents or test run.</Text>

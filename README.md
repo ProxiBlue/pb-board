@@ -5,6 +5,7 @@ A Claude Code **mod** that puts a live progress board in the side pane of the fu
 - **Plan** — the HCF plan being executed: status, a progress bar, and one row per task with its state and how many of its requirements are ticked.
 - **Agents** — the subagents running right now, with how long each has been going.
 - **Playwright** — the test run in progress: totals, pass / fail / flaky / skipped counts, the test each worker is on, and the failures so far.
+- **Test runs** — a band above the prompt with every test suite running on the machine (when the host has a `tests-running` script), and a warning while a run this session started would die with it. `/exit` asks once before quitting while such a run is going.
 
 ```
 PLAN user-authentication            in_progress
@@ -26,9 +27,12 @@ PLAYWRIGHT                          running 42s
 ✗ login.spec.ts › remembers the session      1s
 ```
 
-The board only watches. It never blocks, rewrites or approves a tool call. The one thing it changes is a single environment variable, so Playwright reports to it — see [Playwright progress](#playwright-progress).
+The board never blocks, rewrites or approves a tool call. It changes two things:
 
-> **Status: 0.1.0, early.** Claude Code's mods API is early access and changes between releases. This was built and tested on Claude Code 2.1.321. See [Limits](#limits).
+- a single environment variable, so Playwright reports to it — see [Playwright progress](#playwright-progress);
+- `/exit`, which asks once before quitting while a test run this session started is still going — see [Test runs](#test-runs). A second `/exit` within 20 seconds quits.
+
+> **Status: 0.3.0, early.** Claude Code's mods API is early access and changes between releases. This was built and tested on Claude Code 2.1.321. See [Limits](#limits).
 
 ## Contents
 
@@ -37,6 +41,7 @@ The board only watches. It never blocks, rewrites or approves a tool call. The o
 - [Use](#use)
 - [Plan progress (HCF)](#plan-progress-hcf)
 - [Playwright progress](#playwright-progress)
+- [Test runs](#test-runs)
 - [How it works](#how-it-works)
 - [Limits](#limits)
 - [Troubleshooting](#troubleshooting)
@@ -229,6 +234,70 @@ Set `PB_BOARD_FILE` in Playwright's environment to make the reporter write somew
 - It prints nothing to the terminal.
 - It writes one file and reads none besides `.git` (to find the git directory).
 
+## Test runs
+
+Long suites are easy to kill by accident: close the session that started one and the run dies with it. pb-board shows what is running and asks before `/exit` kills a run.
+
+```
+🧪 tests: shop main+t1 59m · blog main 3m
+⚠ test run in this session: yarn --silent test:all --slots=t1 54m. Closing this session kills it.
+```
+
+Both lines sit in the band above the prompt. They show only while there is something to show. A survey that needs the band always has it first.
+
+### This session's own runs
+
+Every 15 seconds the mod runs `ps` once and looks for test runners started under this session's own process. That covers the Bash tool, background tasks and subagents. It recognises:
+
+- `playwright test`;
+- phpunit and paratest;
+- `bin/magento dev:tests:run`;
+- pytest;
+- `vitest run`;
+- jest;
+- `yarn`, `npm` or `pnpm test` and `test:*` scripts.
+
+Workers, browsers and Playwright's MCP server are not runs. A chain of runners (`yarn test` → `playwright test` → workers) counts as one run, named by its top-most runner.
+
+While such a run is going:
+
+- the band shows the `⚠` line;
+- the pane gets a **TESTS** section;
+- the first `/exit` prints the runs and does not quit:
+
+  ```
+  Test run going in this session; quitting kills it:
+    pkg-test 54m: yarn --silent test:all --slots=t1
+  Type /exit again within 20s to quit anyway.
+  ```
+
+  A second `/exit` within 20 seconds quits. So does any `/exit` when no run is going. If anything goes wrong while checking (no `ps`, an error), `/exit` quits as normal: the mod never traps you in a session.
+
+**What it cannot catch.** These quit without asking:
+
+- `ctrl+c` and `ctrl+d` at an empty prompt;
+- closing the terminal window or tab;
+- `kill` on the session's process;
+- a session in `claude -p` mode ending.
+
+The band's warning is there for those cases. A run started detached from the session (`setsid`, a supervisor, a service) is not this session's: it survives the session anyway, and only the host view shows it.
+
+### The host view (every container)
+
+If an executable called `tests-running` is on the session's `PATH`, the mod also runs `tests-running --json` every 15 seconds. It shows the result as the `🧪` line and as rows in the pane's **TESTS** section. Each run gets two rows: project, slot, runner and elapsed time, then who started it and the command.
+
+The script is not shipped here. pb-board only reads its output, an array of:
+
+```json
+{ "project": "shop-t1", "base": "shop", "slot": "t1", "container": "ddev-shop-t1-web",
+  "kind": "playwright", "label": "playwright test --workers=2", "pid": 1234, "elapsed_s": 1209,
+  "owner": { "kind": "claude", "pid": 999, "name": "shop-agent" } }
+```
+
+`slot` is `main`, a test-slot name such as `t1`, or `host`. `owner.kind` is `claude`, `supervisord` or `shell`. Entries that don't match this shape are skipped.
+
+When the command is missing or fails, nothing shows and the mod waits five minutes before asking again. A container session usually has no `tests-running`, so it shows only its own runs.
+
 ## How it works
 
 ```
@@ -243,12 +312,14 @@ Set `PB_BOARD_FILE` in Playwright's environment to make the reporter write somew
 - **One environment variable.** At session start the mod sets `PW_TEST_REPORTER` for the session's process, unless it is already set or `PB_BOARD_REPORTER=off`. That is the only thing it changes outside its own state.
 - **A one-second timer** does the reading. Files are re-read only when their modification time changes. While nothing is active the timer drops to one pass every five seconds.
 - **The pane redraws only when the data changes.** Elapsed-time counters tick only while an agent or a test is actually running.
+- **A 15-second timer** watches test runs: one `sh -c 'echo $PPID; exec ps …'` to find this session's own runs, and `tests-running --json` where that exists. See [Test runs](#test-runs).
 - **State is per session.** Nothing is written to disk by the mod itself; a new session starts with an empty board.
 
 | File | Role |
 | --- | --- |
 | `hooks/register.tsx` | The mod: hooks, the poll loop, the `/board` command, the pane |
 | `hooks/parse.ts` | Pure parsers for plan files, task files and the reporter's lines |
+| `hooks/watch.ts` | Test-run detection from `ps`, the `tests-running` reader, the band's words |
 | `types/index.d.ts` | The mod's state contract |
 | `reporter/pb-board-reporter.cjs` | The Playwright reporter (runs in Node, not in Claude Code) |
 | `tests/board.test.tsx` | Tests, run by `claude plugin test` |
@@ -263,6 +334,9 @@ Set `PB_BOARD_FILE` in Playwright's environment to make the reporter write somew
 - **A killed run looks alive for a while.** If Playwright is killed before it can write its last line, the board shows the run as `running` until ten minutes pass with no new event, then marks it `stalled`.
 - **Runs from before the session are ignored.** A finished run only shows if it ended after the session began.
 - **Terminal output is not read.** A run that does not load the reporter (see [When you have to wire it by hand](#when-you-have-to-wire-it-by-hand)) leaves the Playwright section empty.
+- **`/exit` is the only exit it can stop.** `ctrl+c`, `ctrl+d`, closing the terminal and `kill` quit without asking. See [Test runs](#test-runs).
+- **Runs are found by process tree.** A run is this session's only if it was started under the session's own process. Runner detection matches command lines. A runner it doesn't recognise is not seen, and a run inside a container is visible only to the container's own sessions and to the host's `tests-running`.
+- **Linux and macOS.** Test-run detection needs `sh` and a `ps` that takes `-eo pid=,ppid=,etimes=,args=`.
 - **Not type-checked in CI.** The mod is checked by `claude plugin validate` and `claude plugin test`; there is no `tsc` step yet.
 
 ## Troubleshooting
